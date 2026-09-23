@@ -1,0 +1,172 @@
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" defer></script>
+<script>
+(function(){
+  'use strict';
+  var ocrBtn = null;
+  var ocrBusy = false;
+
+  function tesseractReady(){
+    return typeof Tesseract !== 'undefined';
+  }
+
+  function digitsToLatin(str){
+    var map = {'٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9','۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9'};
+    return String(str).replace(/[٠-٩۰-۹]/g, function(d){ return map[d] || d; });
+  }
+
+  function parseDateFromText(text){
+    if(!text) return null;
+    var t = digitsToLatin(text);
+    // نمط 1: YYYY-MM-DD أو YYYY/MM/DD
+    var m1 = t.match(/(20\d{2})[-\/\.\s]+(\d{1,2})[-\/\.\s]+(\d{1,2})/);
+    if(m1){
+      var y = +m1[1], mo = +m1[2], d = +m1[3];
+      if(mo > 12){ var tmp = mo; mo = d; d = tmp; }
+      if(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)
+        return pad(y) + '-' + pad(mo) + '-' + pad(d);
+    }
+    // نمط 2: DD-MM-YYYY أو DD/MM/YYYY
+    var m2 = t.match(/(\d{1,2})[-\/\.\s]+(\d{1,2})[-\/\.\s]+(20\d{2})/);
+    if(m2){
+      var d2 = +m2[1], mo2 = +m2[2], y2 = +m2[3];
+      if(d2 > 12 && mo2 <= 12){
+        if(d2 >= 1 && d2 <= 31 && mo2 >= 1 && mo2 <= 12)
+          return pad(y2) + '-' + pad(mo2) + '-' + pad(d2);
+      } else if(mo2 >= 1 && mo2 <= 12 && d2 >= 1 && d2 <= 31){
+        return pad(y2) + '-' + pad(mo2) + '-' + pad(d2);
+      }
+    }
+    // نمط 3: MM/YY أو DD/MM/YY
+    var m3 = t.match(/(\d{1,2})[-\/\.](\d{1,2})[-\/\.](\d{2})\b/);
+    if(m3){
+      var d3 = +m3[1], mo3 = +m3[2], y3 = 2000 + +m3[3];
+      if(d3 >= 1 && d3 <= 31 && mo3 >= 1 && mo3 <= 12)
+        return pad(y3) + '-' + pad(mo3) + '-' + pad(d3);
+    }
+    return null;
+  }
+
+  function pad(n){ return String(n).padStart(2, '0'); }
+
+  async function runOCR(file){
+    if(!file) return;
+    if(!tesseractReady()){
+      showToast('⏳ جاري تحميل محرّك القراءة...');
+      await new Promise(function(resolve){
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+        s.onload = resolve;
+        s.onerror = function(){ resolve(); };
+        document.head.appendChild(s);
+      });
+    }
+    if(!tesseractReady()){ showToast('⚠️ تعذر تحميل محرّك القراءة'); return; }
+
+    ocrBtn.textContent = '⏳';
+    ocrBtn.disabled = true;
+
+    try {
+      // نضغط الصورة أولاً لتسريع القراءة
+      var img = await compressForOCR(file);
+      var result = await Tesseract.recognize(img, 'ara+eng', {
+        logger: function(m){
+          if(m.status === 'recognizing text' && ocrBtn){
+            ocrBtn.textContent = '⏳ ' + Math.round(m.progress * 100) + '%';
+          }
+        }
+      });
+      var text = result && result.data && result.data.text;
+      var iso = parseDateFromText(text);
+      if(iso){
+        var fDate = document.getElementById('fDate');
+        var fPrep = document.getElementById('fPrep');
+        if(!fPrep.value) fPrep.value = todayISO();
+        fDate.value = iso;
+        if(window.updateDurHint) window.updateDurHint();
+        showToast('✅ تم استخراج التاريخ: ' + iso);
+        buzz(15);
+      } else {
+        showToast('⚠️ لم يُعثر على تاريخ واضح. املأه يدوياً.');
+      }
+    } catch(e){
+      console.error('[salahiya] OCR failed:', e);
+      showToast('⚠️ تعذّر قراءة الصورة');
+    } finally {
+      ocrBtn.textContent = '📷';
+      ocrBtn.disabled = false;
+    }
+  }
+
+  function compressForOCR(file){
+    return new Promise(function(resolve){
+      var reader = new FileReader();
+      reader.onload = function(){
+        var img = new Image();
+        img.onload = function(){
+          var max = 1200, w = img.width, h = img.height;
+          if(w > h && w > max){ h = h*max/w; w = max; }
+          else if(h > max){ w = w*max/h; h = max; }
+          var c = document.createElement('canvas');
+          c.width = Math.round(w); c.height = Math.round(h);
+          var ctx = c.getContext('2d');
+          // تباين أعلى = قراءة أفضل
+          ctx.filter = 'grayscale(1) contrast(1.5)';
+          ctx.drawImage(img, 0, 0, c.width, c.height);
+          resolve(c.toDataURL('image/jpeg', 0.85));
+        };
+        img.onerror = function(){ resolve(reader.result); };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function injectOCRBtton(){
+    var fDate = document.getElementById('fDate');
+    if(!fDate || document.getElementById('ocrBtn')) return;
+
+    var wrap = fDate.parentElement;
+    wrap.style.position = 'relative';
+
+    ocrBtn = document.createElement('button');
+    ocrBtn.id = 'ocrBtn';
+    ocrBtn.type = 'button';
+    ocrBtn.textContent = '📷';
+    ocrBtn.title = 'قراءة التاريخ بالكاميرا';
+    ocrBtn.style.cssText = 'position:absolute;left:8px;top:calc(50% + 8px);transform:translateY(-50%);width:44px;height:44px;border-radius:12px;background:var(--surface-2);border:1px solid var(--border);font-size:20px;cursor:pointer;z-index:5;display:grid;place-items:center;padding:0;';
+    wrap.appendChild(ocrBtn);
+
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.capture = 'environment';
+    input.style.display = 'none';
+    wrap.appendChild(input);
+
+    ocrBtn.addEventListener('click', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      if(ocrBusy) return;
+      input.click();
+    });
+
+    input.addEventListener('change', function(){
+      var f = this.files && this.files[0];
+      if(f){
+        ocrBusy = true;
+        runOCR(f).finally(function(){ ocrBusy = false; input.value = ''; });
+      }
+    });
+  }
+
+  // ننتظر حتى يكون الـ DOM جاهزاً
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', injectOCRBtton);
+  } else {
+    setTimeout(injectOCRBtton, 300);
+  }
+
+  // نعرّض الدالة للاستخدام العام
+  window.updateDurHint = window.updateDurHint || null;
+})();
+</script>
